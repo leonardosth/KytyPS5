@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "gpu_tiler_shaders/gpu_tiler_demote_d16_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_depth_spv.h"
 #include "gpu_tiler_shaders/gpu_tiler_promote_d16_spv.h"
@@ -226,7 +227,11 @@ void TileManager::Prepare(bool tile, uint64_t tiled_capacity, uint64_t linear_ca
 	EXIT_NOT_IMPLEMENTED(dispatches.size() > UINT64_MAX / stride);
 	const uint64_t bytes  = dispatches.size() * stride;
 	auto [mapped, offset] = m_stream_buffer.Map(bytes, uniform_alignment);
-	EXIT_IF(mapped == nullptr);
+	if (mapped == nullptr) {
+		LOG_WARNING("TileManager: stream buffer mapping failed for %" PRIu64 " bytes, skipping dispatches\n", bytes);
+		dispatches.clear();
+		return;
+	}
 	for (size_t index = 0; index < dispatches.size(); index++) {
 		std::memcpy(mapped + index * stride, &dispatches[index].push, sizeof(Push));
 		dispatches[index].params_offset = offset + index * stride;
@@ -281,6 +286,9 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset,
                          uint64_t source_capacity, vk::Buffer target, uint64_t target_offset,
                          uint64_t target_capacity, std::span<Dispatch> dispatches,
                          bool clear_target) {
+	if (dispatches.empty()) {
+		return;
+	}
 	const auto&    limits = m_graphics.GetPhysicalDeviceProperties().limits;
 	const uint64_t descriptor_alignment =
 	    std::max<uint64_t>(limits.minStorageBufferOffsetAlignment, 4);

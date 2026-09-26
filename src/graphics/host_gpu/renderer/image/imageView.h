@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_IMAGEVIEW_H_
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shader.h"
@@ -49,10 +50,10 @@ namespace ImageViewOps {
 	return true;
 }
 
-[[noreturn]] inline void UnsupportedColorView(const char* usage, vk::Format image_format,
-                                              vk::Format view_format, uint32_t swizzle) noexcept {
-	EXIT("unsupported %s color image view: image_format=%d view_format=%d swizzle=0x%03x\n", usage,
-	     static_cast<int>(image_format), static_cast<int>(view_format), swizzle);
+inline void UnsupportedColorView(const char* usage, vk::Format image_format,
+                                 vk::Format view_format, uint32_t swizzle) noexcept {
+	LOG_WARNING("unsupported %s color image view: image_format=%d view_format=%d swizzle=0x%03x\n", usage,
+	            static_cast<int>(image_format), static_cast<int>(view_format), swizzle);
 }
 
 [[nodiscard]] inline vk::Format SrgbStorageViewFormat(vk::Format image_format) noexcept {
@@ -76,6 +77,7 @@ SelectSampledColorView(vk::Format image_format, vk::Format view_format, uint32_t
 		return swizzle;
 	}
 	UnsupportedColorView("sampled", image_format, view_format, swizzle);
+	return DstSel(0, 1, 2, 3);
 }
 
 [[nodiscard]] inline bool IsSupportedSampledDepthView(vk::Format image_format,

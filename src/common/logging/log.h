@@ -63,5 +63,7 @@ inline constexpr auto BrightWhite   = fmt::fg(fmt::terminal_color::bright_white)
 			::Log::Write((style), ::fmt::sprintf(__VA_ARGS__));                                    \
 		}                                                                                          \
 	} while (false)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_WARNING(...) LOGF_COLOR(::Log::Color::BrightYellow, __VA_ARGS__)
 
 #endif /* KYTY_COMMON_LOGGING_LOG_H_ */

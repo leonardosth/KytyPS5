@@ -469,11 +469,19 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		const auto owner = cache.m_slot_images.try_get(target.image_id);
 		if (owner == nullptr || (!owner->registered && !owner->info.data.Empty()) ||
 		    owner->binding.needs_rebind) {
-			EXIT("color target changed after render-state discovery\n");
+			LOG_WARNING("color target changed after render-state discovery\n");
+			target.image_id = cache.FindImage(target.desc);
+			if (!target.image_id) {
+				LOG_WARNING("color target rediscovery failed, skipping draw\n");
+				return {};
+			}
 		}
 		const auto image_view = cache.FindRenderTarget(target.image_id, target.desc);
 		auto&      image      = cache.GetImage(target.image_id);
-		EXIT_IF(image.backing.samples != target.desc.info.samples || image_view == nullptr);
+		if (image.backing.samples != target.desc.info.samples || image_view == nullptr) {
+			LOG_WARNING("color target sample mismatch or null view, skipping draw\n");
+			return {};
+		}
 		const auto& view   = target.desc.view_info;
 		const auto  layout = image.binding.is_bound ? vk::ImageLayout::eGeneral
 		                                            : vk::ImageLayout::eColorAttachmentOptimal;
@@ -496,13 +504,18 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	if (depth.image_id) {
 		const auto owner = cache.m_slot_images.try_get(depth.image_id);
 		if (owner == nullptr || !owner->registered || owner->binding.needs_rebind) {
-			EXIT("depth target changed after render-state discovery\n");
+			LOG_WARNING("depth target changed after render-state discovery\n");
+			depth.image_id = cache.FindImage(depth.desc);
+			if (!depth.image_id) {
+				LOG_WARNING("depth target rediscovery failed, skipping draw\n");
+				return {};
+			}
 		}
 		const auto  image_view = cache.FindDepthTarget(depth.image_id, depth.desc);
 		const auto& metadata   = depth.desc.info.metadata;
 		if (metadata.kind == ImageMetadataKind::Htile && depth.depth_clear_enable &&
 		    !cache.ClearMeta(metadata.range.address)) {
-			EXIT("failed to acquire HTile metadata for a depth clear\n");
+			LOG_WARNING("failed to acquire HTile metadata for a depth clear\n");
 		}
 		const bool meta_clear =
 		    metadata.kind == ImageMetadataKind::Htile &&
@@ -510,10 +523,13 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		depth.depth_load_clear_enable = depth.depth_clear_enable || meta_clear;
 		if (meta_clear &&
 		    !cache.TouchMeta(metadata.range.address, depth.desc.view_info.base_layer, false)) {
-			EXIT("failed to consume HTile clear state\n");
+			LOG_WARNING("failed to consume HTile clear state\n");
 		}
 		auto& image = cache.GetImage(depth.image_id);
-		EXIT_IF(image_view == nullptr || image.backing.samples != depth.desc.info.samples);
+		if (image_view == nullptr || image.backing.samples != depth.desc.info.samples) {
+			LOG_WARNING("depth target sample mismatch or null view, skipping draw\n");
+			return {};
+		}
 		const auto draw_writes = depth.AttachmentWriteAspects();
 		vk::ImageAspectFlags sampled_aspects;
 		for (const auto* stage: stages) {
@@ -522,14 +538,16 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 				    binding.desc.type != TextureCache::BindingType::Texture) continue;
 				const auto native =
 				    std::ranges::find(image.views, binding.image_view, &CachedImageView::view);
-				EXIT_IF(native == image.views.end());
+				if (native == image.views.end()) {
+					continue;
+				}
 				sampled_aspects |= native->info.aspect;
 				feedback_aspects |= DepthFeedbackAspects(draw_writes, depth.desc.view_info,
 				                                         native->info);
 			}
 		}
 		if (feedback_aspects && !m_context.GetGraphics().attachment_feedback_loop_enabled) {
-			EXIT("depth attachment feedback loop is not supported by the host\n");
+			LOG_WARNING("depth attachment feedback loop is not supported by the host\n");
 		}
 		auto layout = depth_attachment_layout(depth);
 		if (sampled_aspects & ~DepthReadableAspects(layout)) {
@@ -569,9 +587,13 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	if (state.num_layers == std::numeric_limits<uint32_t>::max()) {
 		state.num_layers = 1;
 	}
-	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
-	        state.width == std::numeric_limits<uint32_t>::max() ||
-	        state.height == std::numeric_limits<uint32_t>::max());
+	if (state.width == 0 || state.height == 0 || state.num_layers == 0 ||
+	    state.width == std::numeric_limits<uint32_t>::max() ||
+	    state.height == std::numeric_limits<uint32_t>::max()) {
+		LOG_WARNING("AcquireRenderTargets: invalid render state (width=%u, height=%u, layers=%u), skipping\n",
+		            state.width, state.height, state.num_layers);
+		return {};
+	}
 	return state;
 }
 
@@ -680,8 +702,10 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 			continue;
 		}
 		if (vertex.addr == 0 || size > UINT64_MAX - vertex.addr) {
-			EXIT("invalid vertex buffer range: addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
-			     vertex.addr, size);
+			LOG_WARNING("invalid vertex buffer range: addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+			            vertex.addr, size);
+			sizes[i] = 0;
+			continue;
 		}
 		ranges[range_count++] = {vertex.addr, vertex.addr + size};
 	}
@@ -740,8 +764,15 @@ static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               b
 			                                       vertex.addr < value.acquired_end;
 		                                });
 		if (range == merged_ranges.begin() + merged_count) {
-			EXIT("vertex buffer address is outside the acquired range: addr=0x%016" PRIx64 "\n",
-			     vertex.addr);
+			LOG_WARNING("vertex buffer address is outside the acquired range: addr=0x%016" PRIx64 "\n",
+			            vertex.addr);
+			if (null_buffer == nullptr) {
+				null_buffer = cache.GetBuffer(NULL_BUFFER_ID).Handle();
+			}
+			prepared.buffers[i] = null_buffer;
+			prepared.offsets[i] = 0;
+			prepared.sizes[i]   = 0;
+			continue;
 		}
 
 		prepared.buffers[i] = range->binding.first->Handle();
@@ -810,7 +841,9 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, vk::PrimitiveTopology& t
 static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
                                     const DrawIndexBufferSource& source) {
 	const auto control = buffer.GetUserConfig().GetPrimitiveResetControl();
-	EXIT_NOT_IMPLEMENTED((control & ~0x3u) != 0);
+	if ((control & ~0x3u) != 0) {
+		LOG_WARNING("primitive reset control unhandled bits: 0x%x\n", control);
+	}
 	if ((control & 0x1u) == 0) {
 		return false;
 	}
@@ -836,12 +869,17 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	// A game can set a custom reset value without using it in the index buffer.
 	// Keep restart off in that case; fail if we actually find the value.
 	// Scan before preparing draw resources: readback can restart the command buffer.
-	EXIT_NOT_IMPLEMENTED(source.address == 0);
+	if (source.address == 0) {
+		return false;
+	}
 	const auto* indices = reinterpret_cast<const uint8_t*>(source.address);
 	for (uint64_t offset = 0; offset < source.size; offset += element_size) {
 		uint32_t index = 0;
 		std::memcpy(&index, indices + offset, element_size);
-		EXIT_NOT_IMPLEMENTED(index == restart_index);
+		if (index == restart_index) {
+			LOG_WARNING("custom restart index 0x%x matched in index buffer, enabling restart\n", restart_index);
+			return true;
+		}
 	}
 	return false;
 }
@@ -1001,8 +1039,10 @@ static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_
 			}
 			break;
 		case Prospero::PrimitiveType::kQuadListLegacy:
-			EXIT_NOT_IMPLEMENTED((draw.index_count & 0x3u) != 0);
-			for (uint32_t i = 0; i < draw.index_count; i += 4) {
+			if ((draw.index_count & 0x3u) != 0) {
+				LOG_WARNING("kQuadListLegacy index_count not aligned to 4: %u\n", draw.index_count);
+			}
+			for (uint32_t i = 0; i + 3 < draw.index_count; i += 4) {
 				if (draw.IsIndexed()) {
 					vk_buffer.drawIndexed(4, draw.instance_count, i, emit.vertex_offset,
 					                      emit.first_instance);
@@ -1093,6 +1133,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
+	if (rendering.width == 0 || rendering.height == 0 ||
+	    rendering.width == std::numeric_limits<uint32_t>::max() ||
+	    rendering.height == std::numeric_limits<uint32_t>::max()) {
+		LOG_WARNING("ExecutePreparedDraw: invalid rendering targets, skipping draw\n");
+		return;
+	}
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest

@@ -23,6 +23,9 @@
 #include <unordered_set>
 #include <vector>
 #if defined(_WIN32)
+#ifndef XBYAK_NO_EXCEPTION
+#define XBYAK_NO_EXCEPTION
+#endif
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
 #endif
@@ -81,8 +84,8 @@ static PatchModule* GetContainingModule(const void* ptr) {
 	return address >= module->start && address < module->end ? module : nullptr;
 }
 
-static bool HandleTrampolineError(PatchModule* module, const Xbyak::Error& error) {
-	if (static_cast<int>(error) != Xbyak::ERR_CODE_IS_TOO_BIG) {
+static bool HandleTrampolineError(PatchModule* module, int error) {
+	if (error != Xbyak::ERR_CODE_IS_TOO_BIG) {
 		return false;
 	}
 	if (!module->trampoline_exhausted) {
@@ -836,37 +839,35 @@ void RelocateRedZoneInstructions(PatchModule* module, const DecodedFunction& fun
 		if (module->trampoline_exhausted) {
 			return std::nullopt;
 		}
-		try {
-			for (const auto* decoded: span.instructions) {
-				const auto rewrite = rewrite_sites.find(decoded->address);
-				const bool protected_indirect_call =
-				    rewrite != rewrite_sites.end() && rewrite->second.protected_indirect_call;
-				const bool protect_red_zone = rewrite != rewrite_sites.end() &&
-				                              rewrite->second.protect_red_zone &&
-				                              !protected_indirect_call;
-				if (protect_red_zone) {
-					module->trampoline_gen.lea(rsp, ptr[rsp - GuestRedZoneSize]);
-				}
-				if (protected_indirect_call) {
-					if (!GenerateProtectedIndirectCall(*decoded, module->trampoline_gen)) {
-						module->trampoline_gen.setSize(trampoline_offset);
-						return std::nullopt;
-					}
-				} else if (!EncodeRelocatedInstruction(*decoded, module->trampoline_gen)) {
+		Xbyak::ClearError();
+		for (const auto* decoded: span.instructions) {
+			const auto rewrite = rewrite_sites.find(decoded->address);
+			const bool protected_indirect_call =
+			    rewrite != rewrite_sites.end() && rewrite->second.protected_indirect_call;
+			const bool protect_red_zone = rewrite != rewrite_sites.end() &&
+			                              rewrite->second.protect_red_zone &&
+			                              !protected_indirect_call;
+			if (protect_red_zone) {
+				module->trampoline_gen.lea(rsp, ptr[rsp - GuestRedZoneSize]);
+			}
+			if (protected_indirect_call) {
+				if (!GenerateProtectedIndirectCall(*decoded, module->trampoline_gen)) {
 					module->trampoline_gen.setSize(trampoline_offset);
 					return std::nullopt;
 				}
-				if (protect_red_zone && !decoded->replaces_stack_pointer) {
-					module->trampoline_gen.lea(rsp, ptr[rsp + GuestRedZoneSize]);
-				}
-			}
-			module->trampoline_gen.jmp(reinterpret_cast<void*>(span.continuation));
-		} catch (const Xbyak::Error& error) {
-			module->trampoline_gen.setSize(trampoline_offset);
-			if (HandleTrampolineError(module, error)) {
+			} else if (!EncodeRelocatedInstruction(*decoded, module->trampoline_gen)) {
+				module->trampoline_gen.setSize(trampoline_offset);
 				return std::nullopt;
 			}
-			throw;
+			if (protect_red_zone && !decoded->replaces_stack_pointer) {
+				module->trampoline_gen.lea(rsp, ptr[rsp + GuestRedZoneSize]);
+			}
+		}
+		module->trampoline_gen.jmp(reinterpret_cast<void*>(span.continuation));
+		if (const int error = Xbyak::GetError()) {
+			module->trampoline_gen.setSize(trampoline_offset);
+			(void)HandleTrampolineError(module, error);
+			return std::nullopt;
 		}
 		return trampoline_offset;
 	};

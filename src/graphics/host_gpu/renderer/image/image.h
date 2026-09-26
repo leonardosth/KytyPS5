@@ -111,6 +111,10 @@ public:
 		if (!IsCpuDirty()) {
 			EXIT("clean image cannot complete a refresh\n");
 		}
+		ClearCpuDirty();
+	}
+
+	void ClearCpuDirty() noexcept {
 		m_cpu_dirty        = false;
 		m_maybe_cpu_dirty  = false;
 		m_maybe_hash_valid = false;

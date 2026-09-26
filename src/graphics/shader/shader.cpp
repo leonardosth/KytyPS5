@@ -79,7 +79,10 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 }
 
 static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
-	EXIT_IF(g_shader_map == nullptr);
+	if (g_shader_map == nullptr) {
+		LOG_WARNING("%s g_shader_map is null\n", label);
+		return {};
+	}
 
 	std::scoped_lock lock(g_shader_map_mutex);
 
@@ -87,7 +90,8 @@ static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
 		return iter->second;
 	}
 
-	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
+	LOG_WARNING("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
+	return {};
 }
 
 static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code) {
@@ -753,7 +757,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	if (!merged) {
 		if (!ShaderGetStaticVertexInputInfo(regs.es_regs.data_addr, regs.gs_user_sgpr,
 		                                    regs.gs_regs.rsrc2.user_sgpr, sh, data, info)) {
-			EXIT("failed to prepare vertex shader program\n");
+			LOG_WARNING("failed to prepare vertex shader program\n");
 		}
 		info.wave_size = (context.GetShaderStages() & 0x00400000u) != 0 ? 32u : 64u;
 		return params;
@@ -843,7 +847,7 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	input_info = {};
 	if (!ShaderGetStaticVertexInputInfo(regs.ls_regs.data_addr, regs.hs_user_sgpr,
 	                                    regs.hs_regs.rsrc2.user_sgpr, sh, local, input_info[0])) {
-		EXIT("failed to prepare local shader program\n");
+		LOG_WARNING("failed to prepare local shader program\n");
 	}
 	input_info[0].logical_stage       = ShaderType::Local;
 	input_info[1].logical_stage       = ShaderType::TessellationControl;

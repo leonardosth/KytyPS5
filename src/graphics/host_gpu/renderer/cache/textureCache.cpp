@@ -294,7 +294,8 @@ void TextureCache::DeleteImage(ImageId id) {
 		}
 	}
 	if (image->IsGpuModified()) {
-		EXIT("TextureCache: deleting a GPU-modified image without resolving its contents\n");
+		LOG_WARNING("TextureCache: deleting a GPU-modified image without resolving its contents\n");
+		image->ClearGpuModified();
 	}
 	m_download_images.erase(id);
 	if (image->info.HasMetadata()) {
@@ -542,7 +543,8 @@ void TextureCache::RefreshCopySource(ImageId id) {
 	auto& image = m_slot_images[id];
 	RefreshImage(id);
 	if (image.IsDefinitelyCpuDirty()) {
-		EXIT("TextureCache: image copy source remained CPU-dirty after refresh\n");
+		LOG_WARNING("TextureCache: image copy source remained CPU-dirty after refresh\n");
+		image.ClearCpuDirty();
 	}
 }
 
@@ -759,11 +761,12 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	           replacement.info.IsDepth()) {
 		RefreshCopySource(cached_id);
 		if (cached.IsBufferModified() || cached.IsDefinitelyCpuDirty()) {
-			EXIT("TextureCache: multisample depth conversion source is not native-current\n");
+			LOG_WARNING("TextureCache: multisample depth conversion source is not native-current\n");
+		} else {
+			PrepareImageCopy(replacement);
+			m_blit_helper.ReinterpretColorAsMsDepth(cached, replacement);
+			CommitGpuWrite(replacement);
 		}
-		PrepareImageCopy(replacement);
-		m_blit_helper.ReinterpretColorAsMsDepth(cached, replacement);
-		CommitGpuWrite(replacement);
 	} else {
 		LOGF_COLOR(Log::Color::BrightYellow,
 		           "TextureCache: unsupported unequal-sample depth overlap copy (%u -> %u)\n",
@@ -837,15 +840,19 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 			            ? result_id
 			            : ImageId {}};
 		}
-		EXIT("TextureCache: unresolvable equal-address image overlap, address=0x%016" PRIx64
-		     " requested=%ux%u "
-		     "cached=%ux%u requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64
-		     " type=%u/%u tile=%u/%u\n",
-		     requested.data.address, requested.resources.levels, requested.resources.layers,
-		     cached.info.resources.levels, cached.info.resources.layers, requested.data.size,
-		     cached.info.data.size, static_cast<uint32_t>(requested.type),
-		     static_cast<uint32_t>(cached.info.type), static_cast<uint32_t>(requested.tile_mode),
-		     static_cast<uint32_t>(cached.info.tile_mode));
+		LOG_WARNING("TextureCache: unresolvable equal-address image overlap, address=0x%016" PRIx64
+		            " requested=%ux%u "
+		            "cached=%ux%u requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64
+		            " type=%u/%u tile=%u/%u; replacing cached image\n",
+		            requested.data.address, requested.resources.levels, requested.resources.layers,
+		            cached.info.resources.levels, cached.info.resources.layers, requested.data.size,
+		            cached.info.data.size, static_cast<uint32_t>(requested.type),
+		            static_cast<uint32_t>(cached.info.type), static_cast<uint32_t>(requested.tile_mode),
+		            static_cast<uint32_t>(cached.info.tile_mode));
+		if (safe_to_delete) {
+			FreeImage(cached_id);
+		}
+		return {merged_id};
 	}
 
 	const int32_t requested_mip = requested.MipOf(cached.info);
@@ -1015,14 +1022,15 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 		const auto& info = image.info;
 		auto transfer = BuildTextureTransfer(image, binding, TransferDirection::Upload);
 		if (!transfer.valid) {
-			EXIT("TextureCache: invalid texture upload: binding=%u addr=0x%016" PRIx64
-			     " size=0x%016" PRIx64 " format=%u tile=%u family=%u extent=%ux%ux%u "
-			     "pitch=%u levels=%u layers=%u samples=%u\n",
-			     static_cast<uint32_t>(binding), info.data.address, info.data.size,
-			     static_cast<uint32_t>(info.guest_format), static_cast<uint32_t>(info.tile_mode),
-			     static_cast<uint32_t>(transfer.layout.surface.texture.block.family), info.extent.width,
-			     info.extent.height, info.extent.depth, info.pitch, info.resources.levels,
-			     info.resources.layers, info.samples);
+			LOG_WARNING("TextureCache: invalid texture upload: binding=%u addr=0x%016" PRIx64
+			            " size=0x%016" PRIx64 " format=%u tile=%u family=%u extent=%ux%ux%u "
+			            "pitch=%u levels=%u layers=%u samples=%u, skipping upload\n",
+			            static_cast<uint32_t>(binding), info.data.address, info.data.size,
+			            static_cast<uint32_t>(info.guest_format), static_cast<uint32_t>(info.tile_mode),
+			            static_cast<uint32_t>(transfer.layout.surface.texture.block.family), info.extent.width,
+			            info.extent.height, info.extent.depth, info.pitch, info.resources.levels,
+			            info.resources.layers, info.samples);
+			return;
 		}
 		TileManager::Result linear {source.Handle(), source_offset, info.data.size};
 		if (!transfer.tiles.empty()) {
@@ -1048,7 +1056,8 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 	if (info.samples != 1 || destination.backing.samples != 1 ||
 	    info.resources.layers == 0 || info.data.size % info.resources.layers != 0 ||
 	    Prospero::NumBytesPerElement(info.guest_format) != info.bytes_per_block) {
-		EXIT("TextureCache: invalid depth upload\n");
+		LOG_WARNING("TextureCache: invalid depth upload, skipping\n");
+		return;
 	}
 	const auto          layers          = info.resources.layers;
 	const auto          full_slice_size = info.data.size / layers;
@@ -1108,7 +1117,12 @@ void TextureCache::InitializeImage(ImageId id) {
 		const auto [source, source_offset] =
 		    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
 		if (source == nullptr) {
-			EXIT("TextureCache: failed to obtain image upload source\n");
+			LOG_WARNING("TextureCache: failed to obtain image upload source\n");
+			image.ClearBufferModified();
+			if (image.IsCpuDirty()) {
+				image.RefreshComplete();
+			}
+			return;
 		}
 		UploadImage(image, *source, source_offset);
 		image.ClearBufferModified();
@@ -1205,7 +1219,9 @@ void TextureCache::RefreshImage(ImageId id) {
 	bool cpu_dirty = image.IsBufferModified() || image.IsDefinitelyCpuDirty();
 	if (image.info.metadata.compression != VideoOutCompression::Uncompressed) {
 		if (cpu_dirty) {
-			EXIT("TextureCache: compressed guest image refresh is unsupported\n");
+			LOG_WARNING("TextureCache: compressed guest image refresh is unsupported, skipping\n");
+			image.ClearBufferModified();
+			image.ClearCpuDirty();
 		}
 		return;
 	}
@@ -1217,11 +1233,13 @@ void TextureCache::RefreshImage(ImageId id) {
 
 ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	if (!stencil.Valid()) {
-		EXIT("TextureCache: invalid stencil association range\n");
+		LOG_WARNING("TextureCache: invalid stencil association range\n");
+		return {};
 	}
 	auto& depth = m_slot_images[depth_id];
 	if (!depth.info.IsDepth() || !depth.info.HasStencil()) {
-		EXIT("TextureCache: stencil association requires a depth/stencil image\n");
+		LOG_WARNING("TextureCache: stencil association requires a depth/stencil image\n");
+		return {};
 	}
 
 	ImageId association {};
@@ -1381,7 +1399,13 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	TouchImage(image);
 	if (!image.info.data.Empty()) {
 		if (!image.registered || image.depth_id || image.binding.needs_rebind) {
-			EXIT("TextureCache: texture requires rediscovery before final acquisition\n");
+			LOG_WARNING("TextureCache: texture requires rediscovery before final acquisition\n");
+			if (image.depth_id) {
+				const auto owner = m_slot_images.try_get(image.depth_id);
+				if (owner != nullptr) {
+					return owner->FindView(desc.view_info);
+				}
+			}
 		}
 	}
 	if (desc.type == BindingType::Storage) {
@@ -1423,7 +1447,7 @@ vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) 
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
 	if (!image.registered || image.depth_id || image.binding.needs_rebind) {
-		EXIT("TextureCache: color target requires rediscovery before final acquisition\n");
+		LOG_WARNING("TextureCache: color target requires rediscovery before final acquisition\n");
 	}
 	TouchImage(image);
 	image.MarkGpuModified();
@@ -1441,7 +1465,7 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
 	if (!image.registered || image.depth_id || image.binding.needs_rebind) {
-		EXIT("TextureCache: depth target requires rediscovery before final acquisition\n");
+		LOG_WARNING("TextureCache: depth target requires rediscovery before final acquisition\n");
 	}
 	TouchImage(image);
 	image.MarkGpuModified();

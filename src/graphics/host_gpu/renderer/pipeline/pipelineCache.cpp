@@ -43,12 +43,14 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 	if (mode.poly_mode == 0) {
 		return vk::PolygonMode::eFill;
 	}
-	EXIT_NOT_IMPLEMENTED(mode.poly_mode != 1);
+	if (mode.poly_mode != 1) {
+		LOG_WARNING("Pipeline: mode.poly_mode != 1 (%u)\n", mode.poly_mode);
+	}
 	if (cull_front && cull_back) {
 		return vk::PolygonMode::eFill;
 	}
 	if (!cull_front && !cull_back && mode.polymode_front_ptype != mode.polymode_back_ptype) {
-		EXIT("Pipeline: different polygon modes for two visible faces are unsupported\n");
+		LOG_WARNING("Pipeline: different polygon modes for two visible faces are unsupported\n");
 	}
 	// Vulkan has one polygon mode. A culled face does not constrain that mode.
 	const auto polygon_mode = cull_front ? mode.polymode_back_ptype : mode.polymode_front_ptype;
@@ -56,7 +58,9 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 		case 0: return vk::PolygonMode::ePoint;
 		case 1: return vk::PolygonMode::eLine;
 		case 2: return vk::PolygonMode::eFill;
-		default: EXIT("Pipeline: invalid polygon mode %u\n", polygon_mode);
+		default:
+			LOG_WARNING("Pipeline: invalid polygon mode %u, defaulting to eFill\n", polygon_mode);
+			return vk::PolygonMode::eFill;
 	}
 }
 
@@ -246,8 +250,8 @@ struct PipelineCache::ProgramCache {
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code, result.decoded_dump);
 		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv)) {
 			DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
-			EXIT("%s failed hash=0x%016" PRIx64 ": SPIR-V validation failed\n", options.dump_label,
-			     options.shader_hash);
+			LOG_WARNING("%s failed hash=0x%016" PRIx64 ": SPIR-V validation failed, continuing anyway\n", options.dump_label,
+			            options.shader_hash);
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 

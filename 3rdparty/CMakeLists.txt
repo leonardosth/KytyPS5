@@ -27,6 +27,9 @@ FetchContent_Declare(
 )
 
 FetchContent_MakeAvailable(xbyak zydis)
+if (TARGET xbyak)
+	target_compile_definitions(xbyak INTERFACE XBYAK_NO_EXCEPTION)
+endif()
 
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 add_subdirectory(SDL3)
